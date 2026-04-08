@@ -22,7 +22,7 @@ const db = admin.firestore();
 const HERO_KEY = process.env.HERO_API_KEY;
 const HERO_URL = "https://hero-sms.com/stubs/handler_api.php";
 
-// ==================== الإعدادات الافتراضية ====================
+// ==================== الثوابت والإعدادات الافتراضية ====================
 const DEFAULT_SETTINGS = {
     usdToEgp: 50,
     profitMargin: 20,
@@ -42,18 +42,64 @@ const DEFAULT_SETTINGS = {
     preferredCountries: ['0', '12', '16', '21', '53', '73', '43', '78', '36', '86', '62', '31']
 };
 
+// مدة صلاحية الكاش (10 دقائق)
+const CACHE_TTL = 10 * 60 * 1000;
+
+// أسماء الدول بالعربية
+const COUNTRY_NAMES = {
+    '0': 'روسيا', '1': 'أوكرانيا', '2': 'كازاخستان', '3': 'الصين', '4': 'الفلبين',
+    '5': 'ميانمار', '6': 'إندونيسيا', '7': 'ماليزيا', '8': 'كينيا', '10': 'فيتنام',
+    '12': 'الولايات المتحدة', '13': 'إسرائيل', '15': 'بولندا', '16': 'إنجلترا',
+    '21': 'مصر', '22': 'الهند', '31': 'جنوب أفريقيا', '36': 'كندا', '37': 'المغرب',
+    '43': 'ألمانيا', '46': 'السويد', '48': 'هولندا', '52': 'تايلاند', '53': 'السعودية',
+    '54': 'المكسيك', '56': 'إسبانيا', '58': 'الجزائر', '62': 'تركيا', '73': 'البرازيل',
+    '78': 'فرنسا', '86': 'إيطاليا', '89': 'تونس', '95': 'الإمارات', '100': 'الكويت',
+    '102': 'ليبيا', '111': 'قطر', '115': 'الأردن', '144': 'البحرين', '156': 'فلسطين'
+};
+
+// أسماء الخدمات بالعربية
+const SERVICE_NAMES_AR = {
+    'tg': 'تيليجرام', 'wa': 'واتساب', 'wb': 'واتساب بزنس', 'gm': 'جوجل', 'go': 'جوجل فويس',
+    'fb': 'فيسبوك', 'ig': 'إنستجرام', 'tw': 'تويتر', 'vk': 'فكونتاكتي', 'ok': 'أودنوكلاسنيكي',
+    'ds': 'ديسكورد', 'nf': 'نتفليكس', 'sn': 'سناب شات', 'im': 'إيمو', 'vi': 'فايبر',
+    'me': 'لاين', 'pp': 'باي بال', 'ts': 'باي بال', 'py': 'بايونير', 'sk': 'سكريل',
+    'am': 'أمازون', 'ub': 'أوبر', 'ly': 'ليفت', 'bv': 'بينانس', 'sf': 'سبوتيفاي',
+    'ya': 'ياندكس', 'ml': 'مايل.رو', 'ma': 'ميل.كوم', 'ol': 'أوت لوك'
+};
+
+// أيقونات الخدمات
+const SERVICE_ICONS = {
+    'tg': 'paper-plane', 'wa': 'whatsapp', 'wb': 'whatsapp',
+    'gm': 'google', 'go': 'google', 'fb': 'facebook', 'ig': 'instagram',
+    'tw': 'twitter', 'vk': 'vk', 'ds': 'discord', 'nf': 'netflix',
+    'sn': 'snapchat', 'pp': 'paypal', 'ts': 'paypal', 'am': 'amazon',
+    'ub': 'uber', 'sf': 'spotify'
+};
+
 // ==================== دوال مساعدة ====================
 
-// جلب الإعدادات من Firestore
+// جلب الإعدادات من Firestore (مع تخزين مؤقت محلي لتقليل الاستدعاءات)
+let cachedSettings = null;
+let settingsLastFetch = 0;
+
 async function getSettings() {
+    const now = Date.now();
+    
+    // استخدام الكاش المحلي لمدة 30 ثانية
+    if (cachedSettings && (now - settingsLastFetch) < 30000) {
+        return cachedSettings;
+    }
+    
     try {
         const doc = await db.collection('settings').doc('pricing').get();
         if (doc.exists) {
-            return { ...DEFAULT_SETTINGS, ...doc.data() };
+            cachedSettings = { ...DEFAULT_SETTINGS, ...doc.data() };
+        } else {
+            await db.collection('settings').doc('pricing').set(DEFAULT_SETTINGS);
+            cachedSettings = DEFAULT_SETTINGS;
         }
-        // حفظ الإعدادات الافتراضية
-        await db.collection('settings').doc('pricing').set(DEFAULT_SETTINGS);
-        return DEFAULT_SETTINGS;
+        settingsLastFetch = now;
+        return cachedSettings;
     } catch (error) {
         console.error('Error getting settings:', error);
         return DEFAULT_SETTINGS;
@@ -79,12 +125,8 @@ async function deductBalance(uid, amount, description) {
     await userRef.update({ balance: admin.firestore.FieldValue.increment(-amount) });
     
     await db.collection('transactions').add({
-        uid,
-        type: 'debit',
-        amount: -amount,
-        description,
-        status: 'completed',
-        createdAt: admin.firestore.FieldValue.serverTimestamp()
+        uid, type: 'debit', amount: -amount, description,
+        status: 'completed', createdAt: admin.firestore.FieldValue.serverTimestamp()
     });
     
     return currentBalance - amount;
@@ -96,12 +138,8 @@ async function addBalance(uid, amount, description) {
     await userRef.update({ balance: admin.firestore.FieldValue.increment(amount) });
     
     await db.collection('transactions').add({
-        uid,
-        type: 'credit',
-        amount,
-        description,
-        status: 'completed',
-        createdAt: admin.firestore.FieldValue.serverTimestamp()
+        uid, type: 'credit', amount, description,
+        status: 'completed', createdAt: admin.firestore.FieldValue.serverTimestamp()
     });
     
     return await getUserBalance(uid);
@@ -121,51 +159,165 @@ async function convertPrice(usdPrice) {
     return Math.round(egpPrice * 100) / 100;
 }
 
-// أسماء الدول بالعربية
+// الحصول على اسم الدولة بالعربية
 function getCountryName(code) {
-    const names = {
-        '0': 'روسيا', '1': 'أوكرانيا', '2': 'كازاخستان', '3': 'الصين', '4': 'الفلبين',
-        '5': 'ميانمار', '6': 'إندونيسيا', '7': 'ماليزيا', '8': 'كينيا', '10': 'فيتنام',
-        '12': 'الولايات المتحدة', '13': 'إسرائيل', '15': 'بولندا', '16': 'إنجلترا',
-        '21': 'مصر', '22': 'الهند', '31': 'جنوب أفريقيا', '36': 'كندا', '37': 'المغرب',
-        '43': 'ألمانيا', '46': 'السويد', '48': 'هولندا', '52': 'تايلاند', '53': 'السعودية',
-        '54': 'المكسيك', '56': 'إسبانيا', '58': 'الجزائر', '62': 'تركيا', '73': 'البرازيل',
-        '78': 'فرنسا', '86': 'إيطاليا', '89': 'تونس', '95': 'الإمارات', '100': 'الكويت',
-        '102': 'ليبيا', '111': 'قطر', '115': 'الأردن', '144': 'البحرين', '156': 'فلسطين'
-    };
-    return names[code] || `دولة ${code}`;
+    return COUNTRY_NAMES[code] || `دولة ${code}`;
 }
 
-// اسم الخدمة بالعربية
+// الحصول على اسم الخدمة بالعربية
 function getServiceNameAr(code) {
-    const names = {
-        'tg': 'تيليجرام', 'wa': 'واتساب', 'wb': 'واتساب بزنس', 'gm': 'جوجل', 'go': 'جوجل فويس',
-        'fb': 'فيسبوك', 'ig': 'إنستجرام', 'tw': 'تويتر', 'vk': 'فكونتاكتي', 'ok': 'أودنوكلاسنيكي',
-        'ds': 'ديسكورد', 'nf': 'نتفليكس', 'sn': 'سناب شات', 'im': 'إيمو', 'vi': 'فايبر',
-        'me': 'لاين', 'pp': 'باي بال', 'ts': 'باي بال', 'py': 'بايونير', 'sk': 'سكريل',
-        'am': 'أمازون', 'ub': 'أوبر', 'ly': 'ليفت', 'bv': 'بينانس', 'sf': 'سبوتيفاي',
-        'ya': 'ياندكس', 'ml': 'مايل.رو', 'ma': 'ميل.كوم', 'ol': 'أوت لوك'
-    };
-    return names[code] || code.toUpperCase();
+    return SERVICE_NAMES_AR[code] || code.toUpperCase();
 }
 
-// أيقونة الخدمة
+// الحصول على أيقونة الخدمة
 function getServiceIcon(code) {
-    const icons = {
-        'tg': 'paper-plane', 'wa': 'whatsapp', 'wb': 'whatsapp',
-        'gm': 'google', 'go': 'google', 'fb': 'facebook', 'ig': 'instagram',
-        'tw': 'twitter', 'vk': 'vk', 'ds': 'discord', 'nf': 'netflix',
-        'sn': 'snapchat', 'pp': 'paypal', 'ts': 'paypal', 'am': 'amazon',
-        'ub': 'uber', 'sf': 'spotify'
-    };
-    return icons[code] || 'globe';
+    return SERVICE_ICONS[code] || 'globe';
+}
+
+// تحديث حالة التفعيل
+async function updateActivationStatus(activationId, status, code = null, fullMessage = null) {
+    try {
+        const snapshot = await db.collection('activations').where('activationId', '==', activationId).get();
+        const updateData = { status, completedAt: admin.firestore.FieldValue.serverTimestamp() };
+        if (code) updateData.code = code;
+        if (fullMessage) updateData.fullMessage = fullMessage;
+        snapshot.forEach(async (doc) => { await doc.ref.update(updateData); });
+    } catch (e) {
+        console.error('Error updating activation status:', e);
+    }
+}
+
+// ==================== نظام الكاش للخدمات الشائعة ====================
+
+// جلب بيانات الخدمات الشائعة من الكاش أو إنشائها
+async function getCachedPopularServices(settings) {
+    try {
+        const cacheDoc = await db.collection('cache').doc('popular_services').get();
+        
+        if (cacheDoc.exists) {
+            const data = cacheDoc.data();
+            const cacheAge = Date.now() - (data.updatedAt?.toDate() || 0);
+            
+            // لو الكاش لسه صالح
+            if (cacheAge < CACHE_TTL) {
+                return { services: data.services, fromCache: true };
+            }
+        }
+        
+        return { services: null, fromCache: false };
+    } catch (error) {
+        console.error('Error getting cached services:', error);
+        return { services: null, fromCache: false };
+    }
+}
+
+// تحديث الكاش في الخلفية
+async function updatePopularServicesCache(settings) {
+    try {
+        const popularServices = settings.popularServices || DEFAULT_SETTINGS.popularServices;
+        const preferredCountries = settings.preferredCountries || DEFAULT_SETTINGS.preferredCountries;
+        const services = [];
+        
+        // استخدام Promise.allSettled للتعامل مع الأخطاء بشكل أفضل
+        const promises = popularServices.map(service => 
+            fetchServiceWithRetry(service, preferredCountries, settings)
+        );
+        
+        const results = await Promise.allSettled(promises);
+        
+        results.forEach((result, index) => {
+            if (result.status === 'fulfilled' && result.value) {
+                services.push(result.value);
+            } else {
+                // إضافة خدمة فارغة في حالة الفشل
+                const service = popularServices[index];
+                services.push({
+                    code: service.code,
+                    name: service.name,
+                    nameAr: getServiceNameAr(service.code),
+                    icon: getServiceIcon(service.code),
+                    countries: [],
+                    totalCountries: 0,
+                    minPrice: 0
+                });
+            }
+        });
+        
+        // ترتيب الخدمات حسب الأقل سعراً
+        services.sort((a, b) => a.minPrice - b.minPrice);
+        
+        // حفظ في الكاش
+        await db.collection('cache').doc('popular_services').set({
+            services,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+        
+        console.log('✅ Popular services cache updated');
+        return services;
+        
+    } catch (error) {
+        console.error('Error updating popular services cache:', error);
+        return null;
+    }
+}
+
+// جلب خدمة مع إعادة المحاولة
+async function fetchServiceWithRetry(service, preferredCountries, settings, retries = 2) {
+    for (let i = 0; i < retries; i++) {
+        try {
+            const url = `${HERO_URL}?api_key=${HERO_KEY}&action=getPrices&service=${service.code}`;
+            const response = await axios.get(url, { timeout: 8000 });
+            const pricesData = response.data;
+            
+            const countries = [];
+            
+            for (const countryCode of preferredCountries) {
+                if (pricesData[countryCode] && pricesData[countryCode][service.code]) {
+                    const countryData = pricesData[countryCode][service.code];
+                    const usdPrice = countryData.cost || 0;
+                    
+                    if (usdPrice > 0 && countryData.count > 0) {
+                        const egpPrice = await convertPrice(usdPrice);
+                        countries.push({
+                            code: countryCode,
+                            name: getCountryName(countryCode),
+                            priceUsd: usdPrice,
+                            priceEgp: egpPrice,
+                            count: countryData.count
+                        });
+                    }
+                }
+            }
+            
+            countries.sort((a, b) => a.priceEgp - b.priceEgp);
+            
+            return {
+                code: service.code,
+                name: service.name,
+                nameAr: getServiceNameAr(service.code),
+                icon: getServiceIcon(service.code),
+                countries,
+                totalCountries: countries.length,
+                minPrice: countries.length > 0 ? countries[0].priceEgp : 0
+            };
+            
+        } catch (err) {
+            if (i === retries - 1) throw err;
+            await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+    }
+    return null;
 }
 
 // ==================== API Endpoints ====================
 
 // 1. فحص صحة السيرفر
 app.get('/api/health', (req, res) => {
-    res.json({ status: 'OK', timestamp: new Date().toISOString() });
+    res.json({ 
+        status: 'OK', 
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime()
+    });
 });
 
 // 2. جلب الإعدادات
@@ -183,6 +335,10 @@ app.post('/api/settings', async (req, res) => {
     try {
         const updates = req.body;
         await db.collection('settings').doc('pricing').set(updates, { merge: true });
+        
+        // مسح الكاش المحلي للإعدادات
+        cachedSettings = null;
+        
         res.json({ success: true, message: 'تم تحديث الإعدادات' });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
@@ -194,6 +350,7 @@ app.get('/api/balance', async (req, res) => {
     try {
         const { uid } = req.query;
         if (!uid) return res.status(400).json({ success: false, error: 'UID required' });
+        
         const balance = await getUserBalance(uid);
         res.json({ success: true, balance });
     } catch (err) {
@@ -201,84 +358,83 @@ app.get('/api/balance', async (req, res) => {
     }
 });
 
-// ==================== 🆕 أشهر 10 خدمات مع دولها وأسعارها ====================
+// 5. أشهر الخدمات (نسخة محسّنة مع كاش)
 app.get('/api/popular-services', async (req, res) => {
     try {
         const settings = await getSettings();
-        const popularServices = settings.popularServices || DEFAULT_SETTINGS.popularServices;
-        const preferredCountries = settings.preferredCountries || DEFAULT_SETTINGS.preferredCountries;
         
-        const result = [];
+        // محاولة جلب البيانات من الكاش
+        const cached = await getCachedPopularServices(settings);
         
-        // نجيب البيانات لكل خدمة بالتوازي (أسرع)
-        const promises = popularServices.map(async (service) => {
-            try {
-                const url = `${HERO_URL}?api_key=${HERO_KEY}&action=getPrices&service=${service.code}`;
-                const response = await axios.get(url);
-                const pricesData = response.data;
-                
-                const countries = [];
-                
-                // نجمع الدول المتاحة
-                for (const countryCode of preferredCountries) {
-                    if (pricesData[countryCode] && pricesData[countryCode][service.code]) {
-                        const countryData = pricesData[countryCode][service.code];
-                        const usdPrice = countryData.cost || 0;
-                        
-                        if (usdPrice > 0 && countryData.count > 0) {
-                            const egpPrice = await convertPrice(usdPrice);
-                            countries.push({
-                                code: countryCode,
-                                name: getCountryName(countryCode),
-                                priceUsd: usdPrice,
-                                priceEgp: egpPrice,
-                                count: countryData.count
-                            });
-                        }
-                    }
+        if (cached.services) {
+            return res.json({
+                success: true,
+                services: cached.services,
+                meta: {
+                    usdToEgp: settings.usdToEgp,
+                    profitMargin: settings.profitMargin,
+                    totalServices: cached.services.length,
+                    cached: true
                 }
-                
-                // ترتيب الدول حسب السعر (الأرخص أولاً)
-                countries.sort((a, b) => a.priceEgp - b.priceEgp);
-                
-                return {
-                    code: service.code,
-                    name: service.name,
-                    nameAr: getServiceNameAr(service.code),
-                    icon: getServiceIcon(service.code),
-                    countries: countries,
-                    totalCountries: countries.length,
-                    minPrice: countries.length > 0 ? countries[0].priceEgp : 0
-                };
-            } catch (err) {
-                console.error(`Error fetching service ${service.code}:`, err.message);
-                return null;
-            }
-        });
+            });
+        }
         
-        const services = (await Promise.all(promises)).filter(s => s !== null && s.countries.length > 0);
-        
-        // ترتيب الخدمات حسب الأقل سعراً
-        services.sort((a, b) => a.minPrice - b.minPrice);
+        // لو مفيش كاش، نرجع بيانات أساسية فوراً
+        const basicServices = settings.popularServices.map(s => ({
+            code: s.code,
+            name: s.name,
+            nameAr: getServiceNameAr(s.code),
+            icon: getServiceIcon(s.code),
+            countries: [],
+            totalCountries: 0,
+            minPrice: 0,
+            loading: true
+        }));
         
         res.json({
             success: true,
-            services: services,
+            services: basicServices,
             meta: {
                 usdToEgp: settings.usdToEgp,
                 profitMargin: settings.profitMargin,
-                totalServices: services.length,
-                cached: false
+                totalServices: basicServices.length,
+                cached: false,
+                loading: true
             }
         });
         
+        // تحديث الكاش في الخلفية (بدون انتظار)
+        updatePopularServicesCache(settings).catch(e => 
+            console.error('Background cache update failed:', e)
+        );
+        
     } catch (err) {
         console.error('Popular services error:', err);
-        res.status(500).json({ success: false, error: err.message });
+        
+        // الرجوع للبيانات الافتراضية في حالة الخطأ
+        const fallbackServices = DEFAULT_SETTINGS.popularServices.map(s => ({
+            code: s.code,
+            name: s.name,
+            nameAr: getServiceNameAr(s.code),
+            icon: getServiceIcon(s.code),
+            countries: [
+                { code: '12', name: 'الولايات المتحدة', priceEgp: 18, count: 10 },
+                { code: '21', name: 'مصر', priceEgp: 8, count: 15 },
+                { code: '53', name: 'السعودية', priceEgp: 14, count: 12 }
+            ],
+            totalCountries: 3,
+            minPrice: 8
+        }));
+        
+        res.json({
+            success: true,
+            services: fallbackServices,
+            meta: { usdToEgp: 50, profitMargin: 20, cached: false, fallback: true }
+        });
     }
 });
 
-// ==================== 🆕 كل الدول لخدمة معينة ====================
+// 6. كل الدول لخدمة معينة
 app.get('/api/service-countries', async (req, res) => {
     try {
         const { service } = req.query;
@@ -289,7 +445,7 @@ app.get('/api/service-countries', async (req, res) => {
         
         const settings = await getSettings();
         const url = `${HERO_URL}?api_key=${HERO_KEY}&action=getPrices&service=${service}`;
-        const response = await axios.get(url);
+        const response = await axios.get(url, { timeout: 10000 });
         const pricesData = response.data;
         
         const countries = [];
@@ -312,7 +468,6 @@ app.get('/api/service-countries', async (req, res) => {
             }
         }
         
-        // ترتيب حسب السعر
         countries.sort((a, b) => a.priceEgp - b.priceEgp);
         
         res.json({
@@ -322,7 +477,7 @@ app.get('/api/service-countries', async (req, res) => {
                 nameAr: getServiceNameAr(service),
                 icon: getServiceIcon(service)
             },
-            countries: countries,
+            countries,
             total: countries.length,
             meta: {
                 usdToEgp: settings.usdToEgp,
@@ -336,32 +491,32 @@ app.get('/api/service-countries', async (req, res) => {
     }
 });
 
-// 5. جلب قائمة الدول
+// 7. جلب قائمة الدول
 app.get('/api/countries', async (req, res) => {
     try {
-        const response = await axios.get(`${HERO_URL}?api_key=${HERO_KEY}&action=getCountries`);
+        const response = await axios.get(`${HERO_URL}?api_key=${HERO_KEY}&action=getCountries`, { timeout: 10000 });
         res.json({ success: true, countries: response.data });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
     }
 });
 
-// 6. جلب قائمة الخدمات (كل الخدمات)
+// 8. جلب قائمة الخدمات (كل الخدمات)
 app.get('/api/services', async (req, res) => {
     try {
         const { country } = req.query;
         let url = `${HERO_URL}?api_key=${HERO_KEY}&action=getServicesList`;
         if (country) url += `&country=${country}`;
         
-        const response = await axios.get(url);
+        const response = await axios.get(url, { timeout: 10000 });
         let services = [];
-        if (response.data && response.data.services) {
+        
+        if (response.data?.services) {
             services = response.data.services;
         } else if (Array.isArray(response.data)) {
             services = response.data;
         }
         
-        // إضافة الاسم العربي والأيقونة
         services = services.map(s => ({
             ...s,
             nameAr: getServiceNameAr(s.code),
@@ -374,7 +529,7 @@ app.get('/api/services', async (req, res) => {
     }
 });
 
-// 7. جلب الأسعار (مع التحويل للمصري)
+// 9. جلب الأسعار (مع التحويل للمصري)
 app.get('/api/prices', async (req, res) => {
     try {
         const { service, country } = req.query;
@@ -384,7 +539,7 @@ app.get('/api/prices', async (req, res) => {
         if (service) url += `&service=${service}`;
         if (country) url += `&country=${country}`;
         
-        const response = await axios.get(url);
+        const response = await axios.get(url, { timeout: 10000 });
         const pricesData = response.data;
         
         const converted = {};
@@ -417,7 +572,7 @@ app.get('/api/prices', async (req, res) => {
     }
 });
 
-// 8. جلب سعر خدمة في دولة محددة
+// 10. جلب سعر خدمة في دولة محددة
 app.get('/api/price', async (req, res) => {
     try {
         const { service, country } = req.query;
@@ -426,7 +581,7 @@ app.get('/api/price', async (req, res) => {
         }
         
         const url = `${HERO_URL}?api_key=${HERO_KEY}&action=getPrices&service=${service}&country=${country}`;
-        const response = await axios.get(url);
+        const response = await axios.get(url, { timeout: 8000 });
         const pricesData = response.data;
         
         let usdPrice = 0;
@@ -447,7 +602,7 @@ app.get('/api/price', async (req, res) => {
     }
 });
 
-// 9. طلب رقم جديد
+// 11. طلب رقم جديد
 app.get('/api/get-number', async (req, res) => {
     try {
         const { uid, service, country, maxPrice } = req.query;
@@ -459,7 +614,7 @@ app.get('/api/get-number', async (req, res) => {
         let url = `${HERO_URL}?api_key=${HERO_KEY}&action=getNumberV2&service=${service}&country=${country}`;
         if (maxPrice) url += `&maxPrice=${maxPrice}`;
         
-        const response = await axios.get(url);
+        const response = await axios.get(url, { timeout: 15000 });
         const data = response.data;
         
         if (typeof data === 'string') {
@@ -515,13 +670,13 @@ app.get('/api/get-number', async (req, res) => {
     }
 });
 
-// 10. فحص وجود كود
+// 12. فحص وجود كود
 app.get('/api/get-sms', async (req, res) => {
     try {
         const { activationId } = req.query;
         if (!activationId) return res.status(400).json({ success: false, error: 'Activation ID required' });
         
-        const response = await axios.get(`${HERO_URL}?api_key=${HERO_KEY}&action=getStatusV2&id=${activationId}`);
+        const response = await axios.get(`${HERO_URL}?api_key=${HERO_KEY}&action=getStatusV2&id=${activationId}`, { timeout: 8000 });
         const data = response.data;
         
         if (typeof data === 'string') {
@@ -551,36 +706,26 @@ app.get('/api/get-sms', async (req, res) => {
     }
 });
 
-async function updateActivationStatus(activationId, status, code = null, fullMessage = null) {
-    try {
-        const snapshot = await db.collection('activations').where('activationId', '==', activationId).get();
-        const updateData = { status, completedAt: admin.firestore.FieldValue.serverTimestamp() };
-        if (code) updateData.code = code;
-        if (fullMessage) updateData.fullMessage = fullMessage;
-        snapshot.forEach(async (doc) => { await doc.ref.update(updateData); });
-    } catch (e) {}
-}
-
-// 11. إعادة إرسال SMS
+// 13. إعادة إرسال SMS
 app.post('/api/resend-sms', async (req, res) => {
     try {
         const { activationId } = req.body;
         if (!activationId) return res.status(400).json({ success: false, error: 'Activation ID required' });
         
-        const response = await axios.get(`${HERO_URL}?api_key=${HERO_KEY}&action=setStatus&id=${activationId}&status=3`);
+        const response = await axios.get(`${HERO_URL}?api_key=${HERO_KEY}&action=setStatus&id=${activationId}&status=3`, { timeout: 8000 });
         res.json({ success: response.data.includes('ACCESS_RETRY_GET'), message: 'تم طلب إعادة الإرسال' });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
     }
 });
 
-// 12. إلغاء الرقم واسترجاع الرصيد
+// 14. إلغاء الرقم واسترجاع الرصيد
 app.post('/api/cancel-number', async (req, res) => {
     try {
         const { uid, activationId, refundAmount } = req.body;
         if (!uid || !activationId) return res.status(400).json({ success: false, error: 'Missing fields' });
         
-        const response = await axios.get(`${HERO_URL}?api_key=${HERO_KEY}&action=setStatus&id=${activationId}&status=8`);
+        const response = await axios.get(`${HERO_URL}?api_key=${HERO_KEY}&action=setStatus&id=${activationId}&status=8`, { timeout: 8000 });
         
         if (response.data.includes('ACCESS_CANCEL') || response.data.includes('STATUS_CANCEL')) {
             const refund = parseFloat(refundAmount) || 0;
@@ -588,7 +733,11 @@ app.post('/api/cancel-number', async (req, res) => {
             
             const snapshot = await db.collection('activations').where('activationId', '==', activationId).get();
             snapshot.forEach(async (doc) => {
-                await doc.ref.update({ status: 'cancelled', cancelledAt: admin.firestore.FieldValue.serverTimestamp(), refundAmount: refund });
+                await doc.ref.update({ 
+                    status: 'cancelled', 
+                    cancelledAt: admin.firestore.FieldValue.serverTimestamp(), 
+                    refundAmount: refund 
+                });
             });
             
             res.json({ success: true, message: 'تم الإلغاء واسترداد الرصيد', newBalance });
@@ -600,20 +749,20 @@ app.post('/api/cancel-number', async (req, res) => {
     }
 });
 
-// 13. إنهاء التفعيل
+// 15. إنهاء التفعيل
 app.post('/api/complete-activation', async (req, res) => {
     try {
         const { activationId } = req.body;
         if (!activationId) return res.status(400).json({ success: false, error: 'Activation ID required' });
         
-        const response = await axios.get(`${HERO_URL}?api_key=${HERO_KEY}&action=setStatus&id=${activationId}&status=6`);
+        const response = await axios.get(`${HERO_URL}?api_key=${HERO_KEY}&action=setStatus&id=${activationId}&status=6`, { timeout: 8000 });
         res.json({ success: response.data.includes('ACCESS_ACTIVATION'), message: 'تم إنهاء التفعيل' });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
     }
 });
 
-// 14. جلب التفعيلات النشطة
+// 16. جلب التفعيلات النشطة
 app.get('/api/active-activations', async (req, res) => {
     try {
         const { uid } = req.query;
@@ -629,7 +778,7 @@ app.get('/api/active-activations', async (req, res) => {
     }
 });
 
-// 15. حساب البونص
+// 17. حساب البونص
 app.post('/api/calculate-bonus', async (req, res) => {
     try {
         const { amount } = req.body;
@@ -647,7 +796,7 @@ app.post('/api/calculate-bonus', async (req, res) => {
     }
 });
 
-// 16. تقديم طلب شحن
+// 18. تقديم طلب شحن
 app.post('/api/submit-payment', async (req, res) => {
     try {
         const { uid, userEmail, amount, paymentMethod, phoneNumber, accountName } = req.body;
@@ -686,6 +835,17 @@ app.post('/api/submit-payment', async (req, res) => {
         });
         
         res.json({ success: true, message: 'تم استلام طلبك', requestId: paymentRequestRef.id, targetAccount });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// 19. مسح الكاش يدوياً (للاستخدام الإداري)
+app.post('/api/clear-cache', async (req, res) => {
+    try {
+        await db.collection('cache').doc('popular_services').delete();
+        cachedSettings = null;
+        res.json({ success: true, message: 'تم مسح الكاش بنجاح' });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
     }
